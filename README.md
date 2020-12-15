@@ -32,9 +32,44 @@ demanda de potência ativa dos consumidores do Grupo A;
 - Apresentar metodologias para a previsão de demanda;
 - Apresentar metodologias para a otimização do valor de demanda a ser contratado;
 
-Este repositório é resultado da disertação Dissertação de Mestrado submetida ao Instituto Federal de Educação, Ciência e Tecnologia de Santa Catarina como parte dos requisitos para
+### 4. Informações
+A aplicação foi desenvolvida no Rstudio. Para a aplicação funcionar corretamente é necessário definir o diretório de trabalho como sendo a pasta raiz desta aplicação.
+
+Este repositório é resultado da Dissertação de Mestrado submetida ao Instituto Federal de Educação, Ciência e Tecnologia de Santa Catarina como parte dos requisitos para
 obtenção do título de Mestre em Engenharia Elétrica.
 
 **Mestrando**: Dyego de Campos\
 **Orientador**: Rubipiara Cavalcante Fernandes, D. Eng.\
 **Coorientador**: Daniel Tenfen, D. Eng
+
+###  5. Banco de dados
+Os bancos de dados utilizados estão armazenados na pasta dataframes e serão explicados a seguir. Os dados são referentes ao dados de demanda de potência e energia ativa de 6 câmpus do Instituto Federal de Educação, Ciência e Tecnologia de Santa Catarina. Os câmpus são identificados por códigos: c1, c2, c2a, c3, c3a, c4, c5, c5a, c6. O código com a letra a no final indica que os valores da geração fotovoltaica foi considerada.
+
+A pasta generation, contém os arquivos .csv com informações sobre os valores gerados nos câmpus que possuem sistema fotovoltaico instalado. Como os sistemas fotovoltaicos instalados nos câmpus analisados são iguais, as simulações consideram apenas os valores reais do câmpus c3 para energia, sendo aplicado aos demais. Para demanda o valor considerado foi a metade da capacidade instalada. O arquivo data_ifsc, dentro da pasta generation, contém os dados referentes aos câmpus do IFSC utilizados, onde NA representa os dados faltantes.
+
+- Descrição do dataframe energies_c3, colunas 1 a 4:
+1. month - mês de referência;
+2. 2018_MW - energia gerada em 2018;
+3. 2019_MW - energia gerada em 2019;
+4. mean - média das energias geradas.
+
+- Descrição do dataframe generics_demands, colunas 1 a 2:
+1. month - mês de referência;
+2. d_kw - demanda considerada;
+
+- Descrição do dataframe data_ifsc, colunas 1 a 8:
+1. ref - referência ao câmpus;
+2. year - ano de referência;
+3. month - mês de referência;
+4. pkd - demanda de ponta;
+5. opd - demanda fora de ponta;
+6. pke - energia de ponta;
+7. ope - energia fora de ponta;
+8. ctrd - demanda contratada.
+
+A pasta macde, contém os arquivos .csv com o padrão utilizado na ferramenta MACDE. Estes arquivos podem ser carregados diretamente na aplicação https://gese.florianopolis.ifsc.edu.br/macde_simulador/. Os dados estão separados por câmpus e histórico. Por exemplo, o arquivo mcd_c2_2016_2018 é referente aos valores câmpus c2, com histórico de três anos (2016-2018) para previsão do ano de 2019.
+
+A pasta nnq_forecast, contém os arquvios .csv no padrão utilizado na aplicação NNQ Forecast https://estatistica.inf.ufsc.br/nnq/forecast/. Os arquivos estão separados por câmpus, por posto tarifário e grandeza. Por exemplo, o arquivo nnq_c1_opd, possui informações da demanda fora de ponta do câmpus c1.
+
+A legenda dos gráficos é gerada automaticamente com base nas informações do arquivo graphicsmessages, que contém as mensagens em dois idiomas: português (pt-br) e inglês (en).
+

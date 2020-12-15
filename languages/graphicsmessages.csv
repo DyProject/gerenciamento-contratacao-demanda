@@ -1,0 +1,47 @@
+msg;pt-br;en
+msg_peak; Ponta; Peak
+msg_off_peak; Fora de Ponta; Off Peak
+msg_legend;Legenda;Legend
+msg_demand_kw;Demanda [kW]; Demand [kW]
+msg_energy_kwh;Energia [kW/h]; Energy [kW/h]
+msg_peak_demand;Demanda de Ponta;Peak Demand
+msg_off_peak_demand;Demanda Fora de Ponta;Off Peak Demand
+msg_peak_demand_kw;Demanda de Ponta [kW];Peak Demand [kW]
+msg_off_peak_demand_kw;Demanda Fora de Ponta [kW];Off Peak Demand [kW]
+msg_total_demand_pu;Demanda total [p.u];Total Demand [p.u]
+msg_total_demand;Demanda total;Total Demand
+msg_total_energy_kwh;Energia total [kW/h];Total Energy [kW/h]
+msg_total_energy;Energia total;Total Energy
+msg_total_energy_pu;Energia total [p.u];Total Energy [p.u]
+msg_peak_energy;Energia de Ponta;Peak Energy
+msg_off_peak_energy;Energia Fora de Ponta;Off Peak Energy
+msg_peak_energy_kwh;Energia de Ponta [kW/h];Peak Energy [kW/h]
+msg_off_peak_energy_kwh;Energia Fora de Ponta [kW/h];Off Peak Energy [kW/h]
+msg_yearsandmonths;Anos e meses;Years and months
+msg_yearsandmonths;Anos e meses;Years and months
+msg_monthly;Mensal;Monthly
+msg_month;Mês;Month
+msg_annual;Anual;Annual
+msg_years;Anos;Years
+msg_year;Ano;Year
+msg_pu;p.u;p.u
+msg_observed;Observado;Observed
+msg_fitted;Ajustado;Fitted
+msg_naive; Naïve; Naïve
+msg_macde; MACDE; MACDE
+msg_nnq; NNQ; NNQ
+msg_upper_95;Lim. superior 95%;Upper 95%
+msg_lower_95;Lim. inferior 95%;Lower 95%
+msg_mean;Média;Mean
+msg_forecast;Previsão;Forecast
+msg_forecast_adjusted;Previsão Ajustada;Forecast Adjusted
+msg_set_test;Conjunto Teste;Set Test
+msg_forecast_macde;Previsão MACDE;Forecast MACDE
+msg_forecast_naive;Previsão Naive;Forecast Naive
+msg_relative_cost;Custo Relativo [R$];Relative Cost [R$]
+msg_annual_relative_cost;Custo Relativo Anual [R$];Annual Relative Cost [R$]
+msg_birthday;Aniversário;Birthday
+msg_with_generation;Com geração;With generation
+msg_no_generation;Sem geração;No generation
+msg_contracted_demand;Demanda Contratada;Contracted Demand
+msg_serie_name;Série temporal;Time Serie

@@ -1,0 +1,582 @@
+---
+title: "Relatório exemplo de aplicação previsão de demanda e otimização"
+author: "Dyego de Campos"
+date: "14/12/2020"
+output:
+  html_document:
+    df_print: paged
+  pdf_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+Este relatório apresenta a implementação da programação utilizada na dissertação de mestrado:
+
+MODELO DE GESTÃO DOS CONTRATOS DE ENERGIA DE CONSUMIDORES – PREVISÃO E OTIMIZAÇÃO DA CONTRATAÇÃO DE DEMANDA DE ENERGIA ELÉTRICA.
+
+Os códigos são relativos ao tratamento dos dados, previsão de demanda utilizando o método média dupla, otimização da demanda contrata utilizando a otimização exploratória e determinística.
+
+# Configuração inicial
+Algumas configurações precisam ser definidas antes de realizar as simulações.
+
+Por exemplo, para realizar a simulação do câmpus c2, para modalidade verde, apenas um patamar, deve-se preencher os seguintes valores na estrutura cfg_opt:
+
+* tariff_modality = "green
+* campus = "c2"
+* type_consumer = "others"
+* maximum.number.reduction = 0             
+* maximum.number.increase = 0
+
+Para realizar a simulação para dois patamares basta alterar para 1, uma das variáveis maximum.number.reduction ou maximum.number.increase.
+  
+```{r message=FALSE, echo = TRUE}
+rm(list=ls(all=T))
+source("functions/init_config.R")
+
+cfg_opt = list(
+  tariff_modality = "blue",      #blue or green
+  campus = "c2",                  #c1, c2, c2a, c3, c3a, c4, c5, c5a, c6
+  type_consumer = "others",       #free, special, others 
+  maximum.number.reduction = 0,              
+  maximum.number.increase = 0, 
+  bigNumber = 1000000,                         
+  overtaking_tolerance = 0.05,                             
+  tariff.post = list(green = 3, blue = c(1, 2)),
+  tariffs = list("pkd" = 32.41, "opd" = 14.69, "not_aplicable" = 14.69), 
+  minimum.demand = list(free = 3000, special = 500, others = 30),#kW
+  horizont = 12,
+  contracted_demand = list("green" = list("dtotal" = list(
+                              "c1" = 85, "c2" = 140, "c2a" = 140, "c3" = 650, "c3a" = 650,
+                              "c4" = 110, "c5" = 130, "c5a" = 130, "c6" = 80)),
+                           "blue"  = list(
+                             "pkd" = list(
+                                "c1" = 50, "c2" = 122, "c2a" = 122, "c3" = 515, "c3a" = 515, 
+                                "c4" = 116, "c5" = 129, "c5a" = 129, "c6" = 75),
+                              "opd" = list(
+                                "c1" = 51, "c2" = 141, "c2a" = 121, "c3" = 737, "c3a" = 714, 
+                                "c4" = 125, "c5" = 138, "c5a" = 119, "c6" = 76)))
+)
+
+all_tariffs <- list("green" = list("dtotal" = cfg_opt$tariffs[["not_aplicable"]], 
+                               "pke" = 1.28, 
+                               "ope" = 0.33),
+                "blue"  = list("pkd" = cfg_opt$tariffs[["pkd"]], 
+                               "opd" = cfg_opt$tariffs[["opd"]],
+                               "pke" = 0.49,
+                               "ope" = 0.33))
+
+#previsão de crescimento para ser utilizada no método de previsão média dupla
+mcd_grwt_forecast = 1.0
+
+slc_campus_set <- cfg_opt$campus
+has_sazonalidade <- !(cfg_opt$maximum.number.reduction == 0 & cfg_opt$maximum.number.increase == 0)
+
+#padronização dos nomes para salvar os gráficos
+saved.name.pattern$campus <- slc_campus_set
+saved.name.pattern$period <- "1419"
+
+#Para os casos dos câmpus com instalação de fotovoltaico (C2a, c3a e c5a) em que o banco de dados é o mesmo, porém para alteração dos valores anteriores é diferente, é preciso fazer a diferenciação
+slc_campus <- substring(slc_campus_set,1,2)
+```
+
+# Leitura e tratamento dos dados
+A tabela apresenta os dados após a eliminação dos dados atípicos, tratamento dos outliers e desconto dos valores gerados.
+
+```{r message=FALSE, echo=FALSE}
+#read datas from .csv to dataframe
+dtfr <- read.csv(file = "dataframes/data_ifsc.csv", sep=";", header = T, encoding = "UTF-8", 
+                 stringsAsFactors = F)
+generation_values_db <- list()
+generation_values_db$energy <- read.csv(file = "dataframes/generation/energies_c3.csv", sep=";",
+                                      header = T, encoding = "UTF-8", stringsAsFactors = F)
+generation_values_db$demand <- read.csv(file = "dataframes/generation/generics_demands.csv",
+                                      sep=";", header = T, encoding = "UTF-8", stringsAsFactors = F)
+
+#Removendo dados atípicos 
+dtfr[(dtfr$year == "2015" & (dtfr$month == 7 | dtfr$month == 8 | dtfr$month == 9)) |
+     (dtfr$year == "2016" & (dtfr$month == 2 | dtfr$month == 3)) |
+     (dtfr$year == "2018" & dtfr$month == 5), c("pkd", "opd", "pke", "ope")] <- NA
+
+#Cria série sem substituir os dados faltantes, sem dividir os dados e apenas os dados básicos
+myts_inteiro <- load_ts(dtfr[dtfr$ref == slc_campus,],
+                basic = T,
+                split = F,
+                imputationMV = F,
+                start.ts = c(2014, 1), 
+                end.ts = c(2019, 12), 
+                freq.ts = 12)
+
+#Removendo outliers
+ts_outliers_out <- outliers_check(myts_inteiro, freq = 12, imputation = T)
+myts <- ts_outliers_out$ts
+
+#####Desconsiderando geração solar fotovoltaica####
+solar_installation_date <- list('c2a' = c(2017,10), 'c3a' = c(2017,7), 'c5a' = c(2017,10))
+if(slc_campus_set == "c2a" | slc_campus_set == "c3a" | slc_campus_set == "c5a") {
+  myts <- discount_generation(myts, freq = 12,
+                              energies_values_generation = generation_values_db$energy$mean,
+                              demands_values_generation = generation_values_db$demand$d_kw,
+                              data_instal_solar = solar_installation_date[[slc_campus_set]])
+}
+
+####dividindo os dados em treino e teste####
+as.data.frame(myts)
+myts <- add_new_no_basic_data_ts(myts)
+myts <- split_data_ts(myts, c(2014, 1), c(2019, 12))
+
+```
+
+# Previsão de Demanda Modelo Média Dupla
+
+Abaixo são apresentados os resultados previstos para 2019, utilizando o Modelo Média Dupla a-3 (2016-2018).
+
+```{r message=FALSE, echo=FALSE}
+
+name_series <- c("pkd", "opd", "pke", "ope", "dtotal")
+mcd.data <- myts$training[["p.2016.2018"]][, name_series]
+mcd.fcast <- matrix(nrow = 12, ncol = 0)
+for (idem in colnames(mcd.data)) {
+  mcd.fcast <- cbind(mcd.fcast,  mcd.double.mean(mcd.data[, idem], frequency = 12, 
+                                                 growth_forecast = mcd_grwt_forecast, round = T))
+}
+colnames(mcd.fcast) <- name_series
+
+as.data.frame(mcd.fcast)
+```
+
+# Previsão de Demanda Modelo NAÏVE
+
+A previsão utilizando o modelo Naïve é apresentada abaixo.
+
+```{r message=FALSE, echo=FALSE}
+naive.fcast <- naiveSimulForecast(myts = myts)
+naive.fcast$p.2014.2018$pkd$mean
+```
+
+# Previsão de Demanda Modelo SARIMA
+
+A ordem dos modelos ARIMA foram obtidas pela aplicação NNQ Forecast da UFSC:
+https://estatistica.inf.ufsc.br/nnq/forecast/
+
+```{r message=F, echo=FALSE}
+#ordem dos modelos ARIMA foram obtidas pela aplicação NNQ Forecast da UFSC: https://estatistica.inf.ufsc.br/nnq/forecast/
+config_arima <- list(period = "p.2014.2018", 
+                     year = "t.2019", 
+                     order = list(
+                              "c1" = list("pkd" = c(0, 0, 1), "opd" = c(1, 0, 0), "pke" = c(0, 0, 0), "ope" = c(0, 0, 1)), 
+                              "c2" = list("pkd" = c(0, 0, 1), "opd" = c(1, 0, 0), "pke" = c(0, 0, 0), "ope" = c(1, 1, 1)),
+                              "c2a"= list("pkd" = c(0, 0, 1), "opd" = c(1, 0, 0), "pke" = c(0, 0, 0), "ope" = c(1, 0, 0)),
+                              "c3" = list("pkd" = c(0, 0, 0), "opd" = c(0, 0, 0), "pke" = c(0, 1, 2), "ope" = c(0, 0, 0)),
+                              "c3a"= list("pkd" = c(0, 0, 0), "opd" = c(0, 0, 0), "pke" = c(0, 1, 2), "ope" = c(0, 0, 0)),
+                              "c4" = list("pkd" = c(1, 1, 1), "opd" = c(1, 0, 0), "pke" = c(0, 0, 1), "ope" = c(1, 0, 0)),
+                              "c5" = list("pkd" = c(0, 0, 0), "opd" = c(1, 0, 0), "pke" = c(0, 0, 2), "ope" = c(1, 0, 0)),
+                              "c5a"= list("pkd" = c(0, 0, 0), "opd" = c(1, 1, 1), "pke" = c(0, 0, 2), "ope" = c(1, 1, 1)),
+                              "c6" = list("pkd" = c(1, 0, 0), "opd" = c(0, 0, 0), "pke" = c(0, 0, 0), "ope" = c(0, 0, 1))
+                              ), 
+                     season_order = list(
+                                    "c1" = list("pkd" = c(0, 1, 1), "opd" = c(1, 1, 0), "pke" = c(1, 1, 0), "ope" = c(1, 1, 0)),
+                                    "c2" = list("pkd" = c(0, 1, 1), "opd" = c(1, 1, 0), "pke" = c(1, 1, 0), "ope" = c(1, 1, 0)),
+                                    "c2a" = list("pkd" = c(0, 1, 1), "opd" = c(1, 1, 0), "pke" = c(1, 1, 0), "ope" = c(1, 0, 0)),
+                                    "c3" = list("pkd" = c(0, 1, 1), "opd" = c(1, 1, 0), "pke" = c(0, 0, 1), "ope" = c(1, 1, 0)),
+                                    "c3a" = list("pkd" = c(0, 1, 1), "opd" = c(1, 1, 0), "pke" = c(0, 0, 1), "ope" = c(1, 1, 0)),
+                                    "c4" = list("pkd" = c(1, 0, 0), "opd" = c(1, 0, 0), "pke" = c(0, 1, 1), "ope" = c(1, 0, 0)),
+                                    "c5" = list("pkd" = c(1, 1, 0), "opd" = c(1, 1, 0), "pke" = c(1, 0, 0), "ope" = c(1, 0, 0)),
+                                    "c5a" = list("pkd" = c(1, 1, 0), "opd" = c(1, 0, 0), "pke" = c(1, 0, 0), "ope" = c(1, 0, 0)),
+                                    "c6" = list("pkd" = c(1, 1, 0), "opd" = c(1, 1, 1), "pke" = c(1, 1, 0), "ope" = c(0, 1, 1))
+                     ),
+                     season_period = 12)
+
+print("Demanda de Ponta")
+nnq_pkd <- arimaSimulForecast(myts, period = config_arima$period, year = config_arima$year, kvalue = 'pkd', order = config_arima$order[[slc_campus_set]][['pkd']], season_order = config_arima$season_order[[slc_campus_set]][['pkd']], season_period = 12)
+
+nnq_table_pkd <- arimaSimulTable(year = "t.2019", kvalue = 'pkd', fcast = nnq_pkd, order = config_arima$order[[slc_campus_set]][['pkd']], season_order = list(order = config_arima$season_order[[slc_campus_set]][['pkd']], period = config_arima$season_period))
+nnq_table_pkd$info <- cbind('kvalue' = 'pkd', nnq_table_pkd$info)
+nnq_table_pkd$compare
+
+print("Demanda Fora de Ponta")
+nnq_opd <- arimaSimulForecast(myts, period = config_arima$period, year = config_arima$year, kvalue = 'opd', order = config_arima$order[[slc_campus_set]][['opd']], season_order = config_arima$season_order[[slc_campus_set]][['opd']], season_period = 12)
+
+nnq_table_opd <- arimaSimulTable(year = "t.2019", kvalue = 'opd', fcast = nnq_opd, order = config_arima$order[[slc_campus_set]][['opd']], season_order = list(order = config_arima$season_order[[slc_campus_set]][['opd']], period = config_arima$season_period))
+nnq_table_opd$info <- cbind('kvalue' = 'opd', nnq_table_opd$info)
+nnq_table_opd$compare
+
+print("Energia de Ponta")
+nnq_pke <- arimaSimulForecast(myts, period = config_arima$period, year = config_arima$year, kvalue = 'pke', order = config_arima$order[[slc_campus_set]][['pke']], season_order = config_arima$season_order[[slc_campus_set]][['pke']], season_period = 12)
+
+nnq_table_pke <- arimaSimulTable(year = "t.2019", kvalue = 'pke', fcast = nnq_pke, order = config_arima$order[[slc_campus_set]][['pke']], season_order = list(order = config_arima$season_order[[slc_campus_set]][['pke']], period = config_arima$season_period))
+nnq_table_pke$info <- cbind("kvalue" = "pke", nnq_table_pke$info)
+nnq_table_pke$compare
+
+print("Energia Fora de Ponta")
+nnq_ope <- arimaSimulForecast(myts, period = config_arima$period, year = config_arima$year, kvalue = 'ope', order = config_arima$order[[slc_campus_set]][['ope']], season_order = config_arima$season_order[[slc_campus_set]][['ope']], season_period = 12)
+
+nnq_table_ope <- arimaSimulTable(year = "t.2019", kvalue = 'ope', fcast = nnq_ope, order = config_arima$order[[slc_campus_set]][['ope']], season_order = list(order = config_arima$season_order[[slc_campus_set]][['ope']], period = config_arima$season_period))
+nnq_table_ope$info <- cbind("kvalue" = "ope", nnq_table_ope$info)
+nnq_table_ope$compare
+
+
+rbind(nnq_table_pkd$info, nnq_table_opd$info, nnq_table_pke$info, nnq_table_ope$info)
+```
+
+# Otimização Exploratória
+
+Os resultados da otimização exploratória são apresentados abaixo.
+
+```{r message=FALSE, echo=FALSE}
+mcd.explor <- data.frame()
+if(cfg_opt$tariff_modality == "blue") {
+  mcd.explor <- sazonalityExploratoryOptimization(mcd.fcast[, c("pkd", "opd")], 
+                                              clearance = 1.01, 
+                                              birt =1:12, 
+                                              weighting = all_tariffs$blue$pkd / all_tariffs$blue$opd,
+                                              case = c(6, 7, 8, 9),  testMode = F)
+  
+} else {
+  mcd.explor <- sazonalityExploratoryOptimization(mcd.fcast[, "dtotal"], clearance = 1.01, 
+                                                  birt = 1, case = 0,  
+                                                  testMode = F)
+}
+
+#caso tenho dois valores ótimos escolhe o primeiro
+mcd.explor
+mcd.explor <- mcd.explor[1,]
+
+#Calculando Custos
+custos <- list()
+custos$demanda_contratada <- list()
+custos$energia_anual <- list()
+
+#divide meses do ano em partes a e b
+meses_separados_vct <- split_vector(mcd.explor$birt[1], mcd.explor$case[1])
+if(cfg_opt$tariff_modality == "blue") {
+  pkd_a <- calculateDemandCost(mcd.fcast[, "pkd"][meses_separados_vct],
+                                            mcd.explor$s1_part_a_demand , 
+                                            tariff = all_tariffs[[modalidade_tarifaria]]$pkd, 
+                                            limit = 1.05)
+  print(pkd_a)
+  pkd_b <- calculateDemandCost(mcd.fcast[, "pkd"][!meses_separados_vct],
+                                            mcd.explor$s1_part_b_demand, 
+                                            tariff = all_tariffs[[modalidade_tarifaria]]$pkd, 
+                                            limit = 1.05)
+  print(pkd_b)
+  opd_a <- calculateDemandCost(mcd.fcast[, "opd"][meses_separados_vct],
+                                            mcd.explor$s2_part_a_demand , 
+                                            tariff = all_tariffs[[modalidade_tarifaria]]$opd, 
+                                            limit = 1.05)
+  print(opd_a)
+  opd_b <- calculateDemandCost(mcd.fcast[, "opd"][!meses_separados_vct],
+                                            mcd.explor$s2_part_b_demand, 
+                                            tariff = all_tariffs[[modalidade_tarifaria]]$opd, 
+                                            limit = 1.05)
+  print(opd_b)
+  custos$pkd_sugerida_anual <- pkd_a$yearly + pkd_b$yearly
+  custos$opd_sugerida_anual <- opd_a$yearly  + opd_b$yearly
+  
+  custos$demanda_contratada$pkd <- calculateDemandCost(mcd.fcast[,'pkd'], 
+                                                       cfg_opt$contracted_demand$blue[['pkd']][[slc_campus_set]], 
+                                                       tariff = all_tariffs$blue[["pkd"]], limit = 1.05)
+  custos$demanda_contratada$opd <- calculateDemandCost(mcd.fcast[,'opd'],
+                                                       cfg_opt$contracted_demand$blue[['opd']][[slc_campus_set]], 
+                                                       tariff = all_tariffs$blue[["opd"]], limit = 1.05)
+  custos$energia_anual["pke"] <- calculateEnergyCost(mcd.fcast[, "pke"],
+                                                       all_tariffs$blue[["pke"]])$yearly
+  custos$energia_anual["ope"] <- calculateEnergyCost(mcd.fcast[, "ope"],
+                                                       all_tariffs$blue[["ope"]])$yearly
+  custos$total_mais_demanda_contrat <- custos$demanda_contratada$pkd$yearly + custos$demanda_contratada$opd$yearly + 
+                                                       custos$energia_anual[["pke"]] + 
+                                                       custos$energia_anual[["ope"]]
+  custos$total_mais_demanda_sug <- custos$pkd_sugerida_anual + custos$opd_sugerida_anual + custos$energia_anual[["pke"]] +
+                                                                        custos$energia_anual[["ope"]]
+  
+} else {
+  dtotal_cost_a <- calculateDemandCost(mcd.fcast[, "dtotal"][meses_separados_vct],
+                                            mcd.explor$s1_part_a_demand , 
+                                            tariff = all_tariffs[[cfg_opt$tariff_modality]]$dtotal,
+                                            limit = 1.05)
+  dtotal_cost_b <- calculateDemandCost(mcd.fcast[, "dtotal"][!meses_separados_vct],
+                                            mcd.explor$s1_part_b_demand , 
+                                            tariff = all_tariffs[[cfg_opt$tariff_modality]]$dtotal,
+                                            limit = 1.05)
+  custos$dtotal_sugerida_anual <- dtotal_cost_a$yearly + dtotal_cost_b$yearly
+  
+  custos$demanda_contratada$dtotal[[slc_campus_set]] <- calculateDemandCost(mcd.fcast[,'dtotal'],
+                                            cfg_opt$contracted_demand$green[['dtotal']][[slc_campus_set]], 
+                                            tariff = all_tariffs$green[['dtotal']], limit = 1.05)
+  custos$energia_anual["pke"] <- calculateEnergyCost(mcd.fcast[, "pke"],
+                                                             all_tariffs$green[["pke"]])$yearly
+  custos$energia_anual["ope"] <- calculateEnergyCost(mcd.fcast[, "ope"],
+                                                             all_tariffs$green[["ope"]])$yearly
+  custos$total_mais_demanda_contrat <- custos$demanda_contratada$dtotal[[slc_campus_set]]$yearly + custos$energia_anual[["pke"]] +      
+                                                                        custos$energia_anual[["ope"]]
+  custos$total_mais_demanda_sug <- custos$dtotal_sugerida_anual + custos$energia_anual[["pke"]] + custos$energia_anual[["ope"]]
+}
+
+#Resultados
+if(cfg_opt$tariff_modality == "blue") {
+  rbind("Câmpus" = slc_campus_set,
+        "part_a_pkd" = mcd.explor$s1_part_a_demand, 
+        "part_b_pkd" = mcd.explor$s1_part_b_demand,
+        "part_a_opd" = mcd.explor$s2_part_a_demand, 
+        "part_b_opd" = mcd.explor$s2_part_b_demand,
+        "esp" = "-",
+        "Contratada_pkd" = cfg_opt$contracted_demand$blue[['pkd']][[slc_campus_set]],
+        "Contratada_opd" = cfg_opt$contracted_demand$blue[['opd']][[slc_campus_set]],
+        "esp" = "-",
+        "demanda_contr_pkd" = custos$demanda_contratada$pkd$yearly,
+        "demanda_contr_opd" = custos$demanda_contratada$opd$yearly,
+        "esp" = "-",
+        "esp" = "-",
+        "demanda_suger_pkd_a" = pkd_a$yearly,
+        "demanda_suger_pkd_b" = pkd_b$yearly,
+        "demanda_suger_opd_a" = opd_a$yearly,
+        "demanda_suger_opd_b" = opd_b$yearly,
+        "pke" = custos$energia_anual$pke,
+        "ope" = custos$energia_anual$ope,
+        "total_energ_dem_contrat" = custos$total_mais_demanda_contrat,
+        "total_energ_dem_sug" = custos$total_mais_demanda_sug,
+        "demanda_suger_pkdTotal" = custos$pkd_sugerida_anual,
+        "demanda_suger_opd_total" = custos$opd_sugerida_anual)
+} else {
+  
+  rbind("Câmpus" = slc_campus_set,
+        "part_a" = mcd.explor$s1_part_a_demand, 
+        "part_b" = mcd.explor$s1_part_b_demand,
+        "contrat" = cfg_opt$contracted_demand$green[['dtotal']][[slc_campus_set]],
+        "demanda_contr" = custos$demanda_contratada$dtotal[[slc_campus_set]]$yearly,
+        "demanda_suger_part_a" = dtotal_cost_a$yearly,
+        "demanda_suger_part_b" = dtotal_cost_b$yearly,
+        "demanda_suger_total" = custos$dtotal_sugerida_anual,
+        "pke" = custos$energia_anual$pke,
+        "ope" = custos$energia_anual$ope,
+        "total_energ_dem_contrat" = custos$total_mais_demanda_contrat,
+        "total_energ_dem_sug" = custos$total_mais_demanda_sug)
+}
+
+mcd.explor
+```
+
+
+# Otimização Determinística
+
+Os resultados da otimização determinística são apresentados abaixo.
+
+```{r message=FALSE, echo=FALSE}
+#Códigos gerados pelo solver
+status_code_lp_solve <- function(number) {
+  code <- list(
+    "optimal solution found",
+    "the model is sub-optimal",
+    "the model is infeasible",
+    "the model is unbounded",
+    "the model is degenerate",
+    "numerical failure encountered",
+    "process aborted",
+    "timeout",
+    "the model was solved by presolve",
+    "the branch and bound routine failed",
+    "the branch and bound was stopped because of a break-at-first or break-at-value",
+    "a feasible branch and bound solution was found",
+    "no feasible branch and bound solution was found")
+  
+  return(code[number + 1])
+}
+
+#Função para deslocar vetor
+shifter <- function(x, n = 1) {
+  if (n == 0) x else c(tail(x, -n), head(x, n))
+}
+
+#Filtra as informações que serão utilizadas
+demand_measured <- as.data.frame(mcd.fcast[,c("pkd", "opd", "dtotal")])
+names(demand_measured) <- c("pkd", "opd", "not_aplicable")
+
+#configuração da função objetivo para as modalidades verdes e azul
+v.df <- list()
+v.df$green <- list("name" = c("faturable demand", "overtaked demand", "contracted demand", 
+                              "bin overtaking", "bin reduction", "bin increased", 
+                              "bin faturable demand"),
+                   "cost" = c(cfg_opt$tariffs$not_aplicable, 
+                              2 * cfg_opt$tariffs$not_aplicable,
+                              rep(0, 5)),
+                   "size" = rep(cfg_opt$horizon, 7),
+                   "type" = c("real", "real", "integer", "binary", "binary", "binary",
+                              "binary"))
+
+#Existem dois valores iguais na lista. O primeiro é referente ao PKD e o segundo ao OPD para modalidade azul.
+v.df$blue <- list("name" = c("faturable demand", "faturable demand","overtaked demand",
+                             "overtaked demand", "contracted demand", "contracted demand",
+                             "bin overtaking", "bin overtaking", "bin reduction",  
+                             "bin reduction", "bin increased", "bin increased", 
+                             "bin tariff post bigger minimum", "bin faturable demand", 
+                             "bin faturable demand"),
+                  "cost" = c(cfg_opt$tariffs$pkd, cfg_opt$tariffs$opd,
+                             2 * cfg_opt$tariffs$pkd, 2 * cfg_opt$tariffs$opd,
+                             rep(0, 11)),
+                  "size" = rep(cfg_opt$horizon, 15),
+                  "type" = c("real", "real", "real", "real", "integer", "integer", 
+                             "binary", "binary", "binary", "binary", "binary", "binary",
+                             "binary", "binary", "binary"))
+
+if(has_sazonalidade) {
+  optiminal_lp_cost <- data.frame()
+  demand_measured_shift <- list()
+  #calcula os valores ótimos para diferentes meses de aniversário
+  for (i_shift in 0:11) {
+    demand_measured_shift$pkd <- shifter(demand_measured$pkd, i_shift)
+    demand_measured_shift$opd <- shifter(demand_measured$opd, i_shift)
+    demand_measured_shift$not_aplicable <- shifter(demand_measured$not_aplicable, i_shift)
+    
+    #optimization
+    lp <-linear_programming_min(cfg_opt, demand_measured_shift, v.df)
+    optiminal_lp_cost <- rbind(optiminal_lp_cost, cbind(get.objective(lp$lp), i_shift, 
+                                                        "code_status" = lp$code_status))
+  }
+  
+  #Valores com os custos ótimos para cada mês de aniversário
+  print("Valores ótimos para cada mês de aniversário, inciando em janeiro igual a i_shift 0 code_status é o retorno do solver")
+  print(optiminal_lp_cost)
+  
+  #valor ótimo global
+  lower_opt_cost <- optiminal_lp_cost[optiminal_lp_cost$V1 == min(optiminal_lp_cost$V1),]
+  new_shift <- lower_opt_cost$i_shift
+  
+  #Valores medidos deslocados de acordo com o aniversário do valor ótimo global.
+  demand_measured_shift <- list()
+  demand_measured_shift$pkd <- shifter(demand_measured$pkd, new_shift)
+  demand_measured_shift$opd <- shifter(demand_measured$opd, new_shift)
+  demand_measured_shift$not_aplicable <- shifter(demand_measured$not_aplicable, new_shift)
+
+#para visualizar o aniversário no vetor descocado. O aniversário sempre será o primeiro mês do vetor deslocado.
+  lista_meses <- c("jan", "fev", "mar", "abr", "mai", "jun", "jul", "ago", "set", "out", "nov", "dez")
+  print(paste("Aniversario: ", new_shift + 1, sep = ""))
+  print(paste("Custo ótimo: ", round(lower_opt_cost$V1, 2), sep = ""))
+  meses_deslocados <- shifter(lista_meses, new_shift)
+  print(meses_deslocados)
+  
+  print("------------------------------------------------------------------------------")
+  print("Demanda LPMIN  - Problema de minimização")
+  print("------------------------------------------------------------------------------")
+  lp_min <-linear_programming_min(cfg_opt, demand_measured_shift, v.df)
+  show_results_lp(cfg_opt, lp_min, demand_measured_shift)
+  print("------------------------------------------------------------------------------")
+  
+  print("------------------------------------------------------------------------------")
+  print("Demanda LPMAX - Problema de maximização")
+  print("------------------------------------------------------------------------------")
+  dem_cont_before <- list()
+  names_compare <- v.df[[cfg_opt$tariff_modality]]$name
+  seq_number_name <- 1:length(names_compare)
+  pos_n_contracted <-seq_number_name[names_compare == "contracted demand"]
+  if(cfg_opt$tariff_modality == "blue") {
+    pos_init <- cfg_opt$horizon * (pos_n_contracted - 1) + 1
+    pos_final <- pos_n_contracted*cfg_opt$horizon
+    dem_cont_before$pkd <- get.variables(lp_min$lp)[pos_init[1] : pos_final[1]]
+    dem_cont_before$opd <- get.variables(lp_min$lp)[pos_init[2] : pos_final[2]]
+  }
+  
+  lp_max <-linear_programming_max(cfg_opt, demand_measured_shift, v.df, get.objective(lp_min$lp),
+                                  dem_cont_before)
+  if(cfg_opt$tariff_modality == "blue") {
+     ####plot graphic
+    names_compare <- v.df[[cfg_opt$tariff_modality]]$name
+    seq_number_name <- 1:length(names_compare)
+    pos_n_contracted <-seq_number_name[names_compare == "contracted demand"]
+      contracted_pkd <- get.variables(lp_max$lp)[((cfg_opt$horizon * (pos_n_contracted - 1)) +
+                                                1)[1]:(pos_n_contracted*cfg_opt$horizon)[1]]
+      contracted_pkd <- shifter(contracted_pkd, -new_shift)
+      contracted_opd <- get.variables(lp_max$lp)[((cfg_opt$horizon * (pos_n_contracted - 1)) +
+                                                1)[2]:(pos_n_contracted*cfg_opt$horizon)[2]]
+      contracted_opd <- shifter(contracted_opd, -new_shift)
+      df <- rbind(cbind(contracted_pkd,"pkd", "mes" = 1:12), cbind(contracted_opd,"opd", 
+                                                                   "mes" = 1:12))
+      colnames(df) <- c("y", "v", "x")
+      df <- as.data.frame(df)
+      g <- ggplot(df, aes(x = as.numeric(as.character(x)), y = as.numeric(as.character(y)), colour=v)) +
+        geom_line(size = 1.5) +
+        scale_colour_manual(name = "", values = c("#A9A9A9", "#696969"), labels = c("opd","pkd")) +
+        get.graph.theme.config() +scale_x_discrete(limits = 1:12)
+      g <- g + ylab(getMsg("msg_demand_kw", lang_activeted)) 
+      g <- g + xlab(getMsg("msg_month", lang_activeted))
+      plot(g)
+      
+      save <- TRUE
+      save.name <- paste("demand_compare_optimization", "LPmax", sep = "_")
+      if(save) {
+        name <- file.name.pattern(save.name, saved.name.pattern$campus, saved.name.pattern$period)
+        ggsave(name, width = graphics.size.pattern$width, height = graphics.size.pattern$height,
+               units = graphics.size.pattern$units)
+      }
+  }
+  show_results_lp(cfg_opt, lp_max, demand_measured_shift)
+  print("------------------------------------------------------------------------------")
+}else {
+  print("------------------------------------------------------------------------------")
+  lp_min <-linear_programming_min(cfg_opt, demand_measured, v.df)
+  print("------------------------------------------------------------------------------")
+  print("Demanda LPMAX - Problema de MINIMIZAÇÃO")
+  print("------------------------------------------------------------------------------")
+  print("Demanda LPMIN")
+  show_results_lp(cfg_opt, lp_min, demand_measured)
+  print("------------------------------------------------------------------------------")
+  
+  dem_cont_before <- list()
+  names_compare <- v.df[[cfg_opt$tariff_modality]]$name
+  seq_number_name <- 1:length(names_compare)
+  pos_n_contracted <-seq_number_name[names_compare == "contracted demand"]
+  if(cfg_opt$tariff_modality == "blue") {
+    
+    dem_cont_before$pkd <- get.variables(lp_min$lp)[((cfg_opt$horizon * (pos_n_contracted[1] - 1))
+                                                  + 1)[1]:(pos_n_contracted[1]*cfg_opt$horizon)[1]]
+    dem_cont_before$opd <- get.variables(lp_min$lp)[((cfg_opt$horizon * (pos_n_contracted[2] - 1))
+                                        + 1)[1]:(pos_n_contracted[2]*cfg_opt$horizon)[1]]
+  }
+  
+  
+  lp_max <-linear_programming_max(cfg_opt, demand_measured, v.df, get.objective(lp_min$lp),
+                                  dem_cont_before)
+  print("------------------------------------------------------------------------------")
+  print("Demanda LPMAX - Problema de maximização")
+  print("------------------------------------------------------------------------------")
+  print("Demanda LPMAX")
+  show_results_lp(cfg_opt, lp_max, demand_measured)
+  print("------------------------------------------------------------------------------")
+  
+  
+  for(lpnome in c("lp_min", "lp_max")){
+    print("------------------------------------------------------------------------------")
+    print(paste("Imprimindo Custos ", lpnome, sep = ""))
+    print("------------------------------------------------------------------------------")
+    values <- list()
+    names_ativos <- c()
+    if(cfg_opt$tariff_modality == "blue") {
+      names_ativos <- c("pkd", "opd")
+    }else {
+      names_ativos <- "not_aplicable"
+    }
+    values <- list()
+    for(posto in names_ativos) {
+      if(lpnome == "lp_min"){
+        lp <- lp_min$lp
+      }else{
+          lp <- lp_max$lp
+        }
+      values[[posto]]$dem_contr <- get.variables(lp)[
+        ((cfg_opt$horizon * (pos_n_contracted - 1))+ 1)[names_ativos == posto]:(pos_n_contracted*cfg_opt$horizon)[names_ativos == posto]]
+      
+      values[[posto]]$dem_med <- demand_measured[, posto] 
+      values[[posto]]$tem_ultrapassagem <- values[[posto]]$dem_med > 
+                                  ((1 + cfg_opt$overtaking_tolerance) * values[[posto]]$dem_contr)
+      values[[posto]]$ultrapassagem <- values[[posto]]$dem_med - values[[posto]]$dem_contr
+      
+      values[[posto]]$faturado <- pmax(values[[posto]]$dem_med, values[[posto]]$dem_contr)
+      
+      values[[posto]]$custo <- sum(cfg_opt$tariffs[[posto]] * values[[posto]]$faturado) + 
+         sum(2 * cfg_opt$tariffs[[posto]] *
+               values[[posto]]$ultrapassagem[values[[posto]]$tem_ultrapassagem])
+    }
+    print(values)
+    print("------------------------------------------------------------------------------")
+  }
+}
+```
